@@ -36,8 +36,19 @@ def write_tsv(path, trains, fs):
             f.write(f"{s / fs:.6f}\t0\t{s}\t{u}\tmotor-unit-spike\n")
 
 
-def unit_metrics(trains, edf, fs):
-    """Official per-unit label-free metrics for every train (no duplicate removal)."""
+def unit_metrics(trains, edf, fs, showdown=None):
+    """Official per-unit label-free metrics for every train (no duplicate removal). showdown = (mode, t_start, t_end): use the
+    Showdown scorer (src/showdown_score.py: scoring window, SIL >= 0.85, >= 25 in-window spikes, PNR from 28 dB, and in dynamic
+    mode the model-recall factor) instead of the familiarization one."""
+    if showdown is not None:
+        from showdown_score import score_file
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "all_events.tsv"; write_tsv(p, trains, fs)
+            _, df = score_file(p, edf, fs, *showdown, dedup=False)
+        df = df.sort_values("unit_id").reset_index(drop=True)
+        df.loc[df["status"] != "good", "metric_score"] = 0.0
+        df["metric_score"] = df["metric_score"].fillna(0.0)
+        return df
     if not EMPTY_GT.exists():
         EMPTY_GT.parent.mkdir(parents=True, exist_ok=True); EMPTY_GT.write_text("onset\tduration\tsample\tunit_id\tevent_type\n")
     with tempfile.TemporaryDirectory() as td:
@@ -137,35 +148,74 @@ def fast_sil(X, S, fs):
     return float(r[0] if isinstance(r, tuple) else r)
 
 
-def select(trains, fsil, edf, fs, pre_sil=0.85, tail=0, tail_sil=0.5):
-    """Exact max-weight non-duplicate set over the units with zero-delay SIL >= pre_sil (weights = official label-free
-    metric_score), written best-first; then up to `tail` more units (zero-delay SIL >= tail_sil, best first) that duplicate
-    nothing already written. Returns (order of unit indices, n_scored, label-free total, per-unit table)."""
+PLAUS_COD, PLAUS_PNR = 0.372, 20.0   # motor-unit plausibility guard (see choose)
+
+
+def metrics_table(trains, fsil, edf, fs, pre_sil=0.85, showdown=None, X=None):
+    """Per-unit table for all trains: n_spikes, zero-delay SIL, and the scorer's label-free metrics (sil, pnr, cod_isi,
+    metric_score; + n_in / recall with the Showdown scorer) for the units with zero-delay SIL >= pre_sil (NaN elsewhere)."""
     n = len(trains)
     cand = [i for i in range(n) if len(trains[i]) >= 10 and fsil[i] >= pre_sil]
     tab = pd.DataFrame({"n_spikes": [len(S) for S in trains], "sil0": fsil})
-    for c in ("sil", "pnr", "cod_isi", "metric_score"):
+    for c in ("sil", "pnr", "cod_isi", "metric_score", "n_in", "recall"):
         tab[c] = np.nan
-    order, tot = [], 0.0
     if cand:
-        m = unit_metrics([trains[i] for i in cand], edf, fs)
-        for c in ("sil", "pnr", "cod_isi", "metric_score"):
-            tab.loc[cand, c] = m[c].to_numpy()
-        w = m["metric_score"].to_numpy(float)
-        sel = mwis(w, conflicts([trains[i] for i in cand], fs))
-        sel.sort(key=lambda i: (-w[i], -m.loc[i, "sil"]))
-        order = [cand[i] for i in sel]; tot = float(w[sel].sum())
+        if showdown is not None and X is not None:                       # exact fast replica (showdown_score.fast_unit_metrics)
+            from showdown_score import fast_unit_metrics
+            m = fast_unit_metrics(X, [trains[i] for i in cand], fs, *showdown)
+        else:
+            m = unit_metrics([trains[i] for i in cand], edf, fs, showdown)
+        for c in ("sil", "pnr", "cod_isi", "metric_score", "n_in", "recall"):
+            if c in m:
+                tab.loc[cand, c] = m[c].to_numpy()
+    return tab
+
+
+def choose(trains, tab, fs, tail=0, guard=True, tail_min_in=10):
+    """Exact max-weight set of distinct units (same-motor-unit rule) by the scorer's label-free metric_score, best first, then up
+    to `tail` more distinct units that the scorer does not credit label-free (label-based upside only), best SIL first
+    (implausible ones only if their SIL is clearly below the cut).
+    Plausibility guard (guard=True): a unit is only written if, wherever it was evaluated, its discharge pattern is motor-unit-like
+    (CoD-ISI < 0.372; a random Poisson-like train gives ~0.5) and its pulse stands clear of the noise (PNR >= 20 dB). Without it,
+    a large candidate pool at high force fills up with noise sources that just clear the scorer's SIL 0.85 cut (recording 046:
+    157 such "units", PNR 13-15 dB, CoD ~0.5). Returns (order of unit indices, n_scored, label-free total)."""
+    n = len(trains); w = tab["metric_score"].fillna(0.0).to_numpy(float)
+    plaus = ((tab["cod_isi"] < PLAUS_COD) & (tab["pnr"] >= PLAUS_PNR)).to_numpy() if guard else np.ones(n, bool)
+    cand = [i for i in range(n) if w[i] > 0 and plaus[i]]
+    sel = mwis(w[cand], conflicts([trains[i] for i in cand], fs)) if cand else []
+    order = sorted((cand[i] for i in sel), key=lambda i: (-w[i], -tab.loc[i, "sil"])); tot = float(w[order].sum())
     n_scored = len(order)
     if tail:
+        # Tail = distinct units the scorer does not credit label-free (they can only earn points by matching a labelled unit).
+        # Implausible ones are kept out unless clearly below the scorer's SIL cut (< 0.80 here), so that a different
+        # preprocessing on the organisers' side cannot turn them into credited noise units.
         ms, tol = int(SAME_MU_LAG * fs), int(np.floor(0.001 * fs + 1e-9)); chosen = set(order)
-        for i in sorted((i for i in range(n) if i not in chosen and len(trains[i]) >= 10 and fsil[i] >= tail_sil), key=lambda i: -fsil[i]):
+        sil = tab["sil"].to_numpy(float); n_in = tab["n_in"].to_numpy(float) if "n_in" in tab else np.full(n, np.inf)
+        pool = [i for i in range(n) if i not in chosen and w[i] == 0 and np.isfinite(sil[i]) and n_in[i] >= tail_min_in
+                and (plaus[i] or sil[i] < 0.80)]
+        for i in sorted(pool, key=lambda i: -sil[i]):
             if len(order) - n_scored >= tail:
                 break
             if all(shared_fraction(trains[i], trains[j], ms, tol, 0.3) < 0.3 for j in order):
                 order.append(i)
-    tab["rank"] = -1
-    tab.loc[order, "rank"] = np.arange(len(order))
-    return order, n_scored, tot, tab
+    return order, n_scored, tot
+
+
+def write_log(a, rec, fs, runs, pooled, n_scored, written, t0, upstream_s):
+    pooled_from = runs + ([f"{a.cands}/{rec}_{a.cand_glob}.npz"] if a.cands else [])
+    log = {"GeneratedBy": [{"Name": "BHopper-MUniverseCBSS-ensemble",
+                           "Description": "MUniverse FastIcaCBSS decompositions (several seeds / peel-off settings, 20-500 Hz band-pass) "
+                                          "and a residual pass, scorer-space and scoring-window-consistent spike-triggered refinement, then the "
+                                          "set of distinct, motor-unit-like units (CoD-ISI < 0.372, PNR >= 20 dB) with the best label-free "
+                                          "quality, best first.",
+                           "CodeURL": "https://github.com/JeetuSK0808/munitquest", "License": "BSD-3-Clause", "Version": "0.3"}],
+           "RuntimeEnvironment": {"python": platform.python_version(), "platform": platform.platform(), "machine": platform.machine()},
+           "Execution": dict(recording=rec, fs=fs, pooled_from=pooled_from, refine=a.refine, wrefine=a.wrefine,
+                             showdown_scorer=a.showdown, plausibility_guard=not a.no_guard, pre_sil=a.pre_sil, tail=a.tail,
+                             pooled_units=pooled, scored_units=n_scored, written_units=written,
+                             runtime_s=round(time.time() - t0, 1),
+                             Runtime=float(round(time.time() - t0 + upstream_s, 1)))}   # s, all stages that fed this file
+    json.dump(log, open(a.out / f"{rec}_desc-decomposed_log.json", "w"), indent=1)
 
 
 def main():
@@ -174,6 +224,10 @@ def main():
     ap.add_argument("--cands", type=Path, default=None, help="raw CBSS candidate cache dir (run_cbss --cands)")
     ap.add_argument("--cand-glob", default="*", help="which cache files to pool for a recording (comma-separated globs after the recording name)")
     ap.add_argument("--refine", action="store_true", help="also add the scorer-space refined train of every pooled unit")
+    ap.add_argument("--showdown", action="store_true", help="score units with the Showdown scorer (window, mode, new bins)")
+    ap.add_argument("--wrefine", action="store_true", help="also add the scoring-window-consistent refinement of every unit")
+    ap.add_argument("--reuse", action="store_true", help="re-select from <out>/<rec>_pool.npz when it exists")
+    ap.add_argument("--no-guard", action="store_true", help="drop the motor-unit plausibility guard (analysis only)")
     ap.add_argument("--pre-sil", type=float, default=0.85, help="official metrics only for units with zero-delay SIL >= this")
     ap.add_argument("--tail", type=int, default=0, help="append up to this many further non-duplicate units (label-based upside)")
     ap.add_argument("--tail-sil", type=float, default=0.5, help="minimum zero-delay SIL of a tail unit")
@@ -198,11 +252,27 @@ def main():
                 z = np.load(f, allow_pickle=True); u = [np.unique(np.asarray(s, np.int64)) for s in z["spikes"]]
                 upstream_s += float(z["runtime_s"]) if "runtime_s" in z.files else 0.0
                 trains += u; src += [f.stem] * len(u)
+        cached = a.out / f"{rec}_pool.npz"
+        if a.reuse and cached.exists():                                   # re-select from a cached pool (no recompute)
+            z = np.load(cached, allow_pickle=True); trains = list(z["spikes"]); src = [str(x) for x in z["source"]]
+            tab = pd.DataFrame(z["table"], columns=[str(c) for c in z["columns"]])
+            order, n_scored, tot = choose(trains, tab, fs, tail=a.tail, guard=not a.no_guard)
+            tab["rank"] = -1; tab.loc[order, "rank"] = np.arange(len(order)); chosen = [trains[i] for i in order]
+            tab.insert(0, "source", src); tab.to_csv(a.out / f"{rec}_pool_units.csv", index=False)
+            write_tsv(a.out / f"{rec}_desc-decomposed_events.tsv", chosen, fs)
+            write_log(a, rec, fs, runs, len(trains), n_scored, len(chosen), time.time(), float(z["runtime_s"]) if "runtime_s" in z.files else upstream_s)
+            print(f"{rec}: re-selected from cache {len(trains)} -> {n_scored} selected (label-free sum {tot:.2f}), {len(chosen)} written", flush=True)
+            continue
         if not trains:
             print(rec, "no units", flush=True); continue
         from pyedflib.highlevel import read_edf
         from muniverse.algorithms.post_processing import PostProcessCBSS
-        from refine_units import refine
+        from refine_units import refine, wrefine
+        if a.showdown or a.wrefine:
+            from showdown_score import window, mode_of
+            w0, w1 = window(rec_dir); sd = (mode_of(rec), w0, w1) if a.showdown else None
+        else:
+            sd = None
         sig, _, _ = read_edf(str(edf)); pp = PostProcessCBSS(steps=[], verbose=False)
         X = pp._whitening(pp._extension(np.asarray(sig, np.float64))); del sig
         seen = {}; keep = []                                              # drop exact duplicate trains
@@ -217,26 +287,26 @@ def main():
                     seen[S.tobytes()] = -1; extra.append((S, src[k] + "+ref", s1))
             else:
                 fsil.append(fast_sil(X, trains[k], fs))
+            if a.wrefine and fsil[-1] >= 0.5:
+                S = wrefine(X, trains[k], fs, w0, w1)
+                if len(S) >= 10 and S.tobytes() not in seen:
+                    seen[S.tobytes()] = -1; extra.append((S, src[k] + "+wref", fast_sil(X, S, fs)))
         for S, sname, s1 in extra:
             trains.append(S); src.append(sname); fsil.append(s1)
-        del X
         fsil = np.asarray(fsil, float)
-        order, n_scored, tot, tab = select(trains, fsil, edf, fs, pre_sil=a.pre_sil, tail=a.tail, tail_sil=a.tail_sil)
+        tab = metrics_table(trains, fsil, edf, fs, pre_sil=a.pre_sil, showdown=sd, X=X)
+        del X
+        sp = np.empty(len(trains), dtype=object)
+        for k, S in enumerate(trains):
+            sp[k] = S
+        np.savez(a.out / f"{rec}_pool.npz", spikes=sp, source=np.array(src), table=tab.to_numpy(float), columns=np.array(tab.columns),
+                 runtime_s=time.time() - t0 + upstream_s)
+        order, n_scored, tot = choose(trains, tab, fs, tail=a.tail, guard=not a.no_guard)
+        tab["rank"] = -1; tab.loc[order, "rank"] = np.arange(len(order))
         chosen = [trains[i] for i in order]
         tab.insert(0, "source", src); tab.to_csv(a.out / f"{rec}_pool_units.csv", index=False)
         write_tsv(a.out / f"{rec}_desc-decomposed_events.tsv", chosen, fs)
-        pooled_from = runs + ([f"{a.cands}/{rec}_{a.cand_glob}.npz"] if a.cands else [])
-        log = {"GeneratedBy": [{"Name": "BHopper-MUniverseCBSS-ensemble",
-                               "Description": "MUniverse FastIcaCBSS decompositions (several seeds / peel-off settings, 20-500 Hz band-pass), "
-                                              "scorer-space spike-triggered refinement, then the non-duplicate set (challenge duplicate rule) "
-                                              "with the best label-free quality, best first.",
-                               "CodeURL": "https://github.com/JeetuSK0808/munitquest", "License": "BSD-3-Clause", "Version": "0.2"}],
-               "RuntimeEnvironment": {"python": platform.python_version(), "platform": platform.platform(), "machine": platform.machine()},
-               "Execution": dict(recording=rec, fs=fs, pooled_from=pooled_from, refine=a.refine, pre_sil=a.pre_sil, tail=a.tail,
-                                 pooled_units=len(trains), scored_units=n_scored, written_units=len(chosen),
-                                 runtime_s=round(time.time() - t0, 1),
-                                 Runtime=float(round(time.time() - t0 + upstream_s, 1)))}   # s, all stages that fed this file
-        json.dump(log, open(a.out / f"{rec}_desc-decomposed_log.json", "w"), indent=1)
+        write_log(a, rec, fs, runs, len(trains), n_scored, len(chosen), t0, upstream_s)
         print(f"{rec}: pooled {len(trains)} -> {n_scored} selected (label-free sum {tot:.2f}), {len(chosen)} written, "
               f"{time.time() - t0:.0f}s", flush=True)
 

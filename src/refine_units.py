@@ -93,3 +93,23 @@ def main():
 if __name__ == "__main__":
     main()
 
+
+
+def wrefine(X, spikes, fs, t0, t1, iters=8):
+    """Window-consistent refinement for the Showdown scorer. Its refit builds the filter from the spikes inside the scoring window
+    only (mean of the whitened samples there, whitening on the whole recording), and in dynamic mode it re-detects spikes on that
+    source (est_spike_times, defaults) and scales the unit's score by the share of them the unit predicts. Iterate filter from the
+    in-window spikes -> source -> est_spike_times until the train stops changing, so the train is that refit's own fixed point."""
+    lo, hi = t0 * fs, t1 * fs
+    S = np.unique(spikes[(spikes >= 0) & (spikes < X.shape[1])])
+    for _ in range(iters):
+        Sin = S[(S > lo) & (S < hi)]
+        if len(Sin) < 10:
+            break
+        w = X[:, Sin].mean(1); w /= np.linalg.norm(w) + 1e-12
+        out = est_spike_times(source=w @ X, fsamp=fs)
+        S_new = np.asarray(out[0] if isinstance(out, tuple) else out, dtype=np.int64)
+        if len(S_new) < 10 or np.array_equal(S_new, S):
+            break
+        S = S_new
+    return S

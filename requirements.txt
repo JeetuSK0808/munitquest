@@ -4,3 +4,5 @@ scipy==1.18.1
 pandas==3.0.6
 pyedflib==0.1.42
 scikit-learn==1.9.1
+# Showdown scorer replica (src/showdown_score.py, src/pool_select.py --showdown) runs in a second env: muniverse-emg==0.1.7 plus
+# the organisers' scoring package (MUnitQuest/munitquest-algorithm-submission at 46bdda9, bundle/scoring, pip install -e).

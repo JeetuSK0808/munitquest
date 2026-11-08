@@ -22,9 +22,9 @@ STEPS = [
 ]
 
 
-def bandpassed_edf(rec_dir: Path, cache: Path) -> Path:
-    """EMG channels only, 4th-order zero-phase Butterworth 20-500 Hz, written once to an EDF cache."""
-    out = cache / f"{rec_dir.name}_bp.edf"
+def bandpassed_edf(rec_dir: Path, cache: Path, band=(20, 500)) -> Path:
+    """EMG channels only, 4th-order zero-phase Butterworth band-pass (default 20-500 Hz), written once to an EDF cache."""
+    out = cache / (f"{rec_dir.name}_bp.edf" if tuple(band) == (20, 500) else f"{rec_dir.name}_bp{band[0]}-{band[1]}.edf")
     if out.exists():
         return out
     from scipy.signal import butter, sosfiltfilt
@@ -32,7 +32,7 @@ def bandpassed_edf(rec_dir: Path, cache: Path) -> Path:
     sys.path.insert(0, str(ROOT / "src"))
     from run_scd import read_recording
     X, fs, labels = read_recording(rec_dir)
-    sos = butter(4, [20, 500], btype="band", fs=fs, output="sos")
+    sos = butter(4, list(band), btype="band", fs=fs, output="sos")
     Y = sosfiltfilt(sos, X.astype(np.float64), axis=0)
     heads = highlevel.make_signal_headers(labels, dimension="mV", sample_frequency=fs,
                                           physical_min=float(Y.min()) - 1e-6, physical_max=float(Y.max()) + 1e-6)
