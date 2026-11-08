@@ -46,6 +46,18 @@ Local result (label-free branch on our band-passed EDF, all 50 dynamic recording
 organisers' own code path gives 11.40 -> 13.70 (20-500 Hz EDF) and 11.05 -> 13.11 (10-500 Hz EDF, robustness check). Every v2 unit
 that passes the guard with SIL >= 0.85 has the same motor unit in v3.
 
+## Isometric clean-up (8 Nov 2026)
+
+`src/guard_filter.py` applies the same plausibility guard to an existing selection. It scores every written unit with the exact
+replica and drops the units that are not motor-unit-like wherever the Showdown scorer would credit them label-free (or their SIL
+is >= 0.80). Everything else stays unchanged and in order.
+
+On the v2 isometric file, 946 of 3,306 credited units fail the guard: 17.7 % of its label-free credit. Most come from v2's tail of
+extra units, which scored 0 under the familiarization SIL 0.9 cut but now clear the Showdown cut of 0.85 as noise (SIL 0.86-0.90,
+PNR 13-17 dB, CoD-ISI about 0.5). Local label-free result over all 100 recordings: 18.87 -> 15.59 per recording. That includes one
+recording our v2 pooling had missed, now built with the v3 pool. On a fixed 13-recording sample, the organisers' own code path gives
+15.80 -> 12.83 (20-500 Hz EDF; 10-500 Hz EDF: 15.69 -> 12.80).
+
 ## Run
 
 ```bash
