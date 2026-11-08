@@ -14,11 +14,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def read_recording(rec_dir: Path):
-    """EMG channels (type EMG in channels.tab) as float32 (time, channels), plus the sampling rate."""
+    """EMG channels (type EMG in channels.tab/.tsv, status not bad) as float32 (time, channels), plus the sampling rate."""
     import pandas as pd
     from pyedflib.highlevel import read_edf
     name = rec_dir.name
-    ch = pd.read_csv(rec_dir / f"{name}_channels.tab", sep="\t")
+    ch_file = rec_dir / f"{name}_channels.tab"
+    if not ch_file.exists():  # Showdown data ships BIDS-standard _channels.tsv
+        ch_file = rec_dir / f"{name}_channels.tsv"
+    ch = pd.read_csv(ch_file, sep="\t")
+    if "status" in ch.columns:  # drop channels the organisers flagged bad
+        ch = ch[ch["status"].astype(str).str.lower() != "bad"]
     signals, sig_headers, _ = read_edf(str(rec_dir / f"{name}_emg.edf"))
     labels = [h["label"] for h in sig_headers]
     emg = [i for i, l in enumerate(labels) if l in set(ch.loc[ch["type"].str.upper() == "EMG", "name"])]

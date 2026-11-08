@@ -10,7 +10,7 @@
 # usage: src/run_showdown.sh <task_dir> <run>        e.g. src/run_showdown.sh showdown_isometric sd_iso_v2
 cd "$(dirname "$0")/.." || exit 1
 task=$1; run=$2
-mkdir -p logs runs cache/cands submissions
+mkdir -p logs runs cache/cands_$task submissions
 log=logs/showdown_${run}.log
 export VECLIB_MAXIMUM_THREADS=2 OMP_NUM_THREADS=2
 py() { caffeinate -i -s nice -n 10 .venv/bin/python -B -W ignore "$@"; }
@@ -20,11 +20,11 @@ for d in data/"$task"/recording-*/; do
   rec=$(basename "$d"); id=${rec#recording-}; id=${id%%_*}
   [ -f "runs/$run/${rec}_desc-decomposed_events.tsv" ] && continue
   until pmset -g batt | grep -q "AC Power"; do echo "$(date) on battery, waiting" >> "$log"; sleep 300; done
-  py src/run_cbss.py "$task" "runs/${run}_p0" --recs "$id" --cands cache/cands --iters 150 --seeds 1909,7 --refine 2>&1 | keep
-  py src/run_cbss.py "$task" "runs/${run}_p1" --recs "$id" --cands cache/cands --iters 150 --seeds 1909,7 --refine --peel-cov 1.0 2>&1 | keep
+  py src/run_cbss.py "$task" "runs/${run}_p0" --recs "$id" --cands cache/cands_$task --iters 150 --seeds 1909,7 --refine 2>&1 | keep
+  py src/run_cbss.py "$task" "runs/${run}_p1" --recs "$id" --cands cache/cands_$task --iters 150 --seeds 1909,7 --refine --peel-cov 1.0 2>&1 | keep
   py src/pool_select.py "$task" "runs/${run}_base" --recs "$id" --runs "runs/${run}_p0,runs/${run}_p1" 2>&1 | keep
-  py src/residual_pass.py "$task" "runs/${run}_base" --recs "$id" --cands cache/cands 2>&1 | keep
-  py src/pool_select.py "$task" "runs/$run" --recs "$id" --runs "runs/${run}_p0,runs/${run}_p1" --cands cache/cands \
+  py src/residual_pass.py "$task" "runs/${run}_base" --recs "$id" --cands cache/cands_$task 2>&1 | keep
+  py src/pool_select.py "$task" "runs/$run" --recs "$id" --runs "runs/${run}_p0,runs/${run}_p1" --cands cache/cands_$task \
     --cand-glob "resid-${run}_base_*" --refine --tail 40 2>&1 | keep
 done
 py src/pack_submission.py "runs/$run" "submissions/$run.zip" --data "data/$task" >> "$log" 2>&1
