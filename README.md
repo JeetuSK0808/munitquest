@@ -58,6 +58,19 @@ PNR 13-17 dB, CoD-ISI about 0.5). Local label-free result over all 100 recording
 recording our v2 pooling had missed, now built with the v3 pool. On a fixed 13-recording sample, the organisers' own code path gives
 15.80 -> 12.83 (20-500 Hz EDF; 10-500 Hz EDF: 15.69 -> 12.80).
 
+## Showdown v4 re-selection (9 Nov 2026, isometric task)
+
+The dynamic v3 re-selection, unchanged, on the isometric task (`src/queue_sd_pool.sh showdown_isometric sd_iso_v2 sd_iso_v4
+<recs> <tag>`, then `src/pool_select.py ... --reuse --tail 10`). Every recording is re-selected from the candidates already
+computed for v2: the v2 selection, both CBSS runs, their raw candidates and the residual candidates, plus refined and
+scoring-window-consistent refined variants. Selection uses the Showdown label-free metrics with the plausibility guard. The tail
+of further distinct units is 10 per recording, the largest that keeps the file under 10 MB (tail 20 gives 10.4 MB).
+
+Local result (label-free branch, exact replica, all 100 isometric recordings): 15.59 (clean-up) -> 16.99 per recording, with 90
+recordings better, 10 equal and none worse; credited units 2,373 -> 2,592. On the fixed 13-recording sample, the organisers' own
+code path gives 12.83 -> 13.90 (20-500 Hz EDF; 10-500 Hz EDF: 12.80 -> 13.85). 2,454 of the 2,455 v2 units that pass the guard
+with SIL >= 0.85 have the same motor unit in v4.
+
 ## Run
 
 ```bash
